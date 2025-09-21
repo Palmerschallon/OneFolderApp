@@ -1,0 +1,270 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>OneFolder — Capture to Drive</title>
+  <meta name="theme-color" content="#1c1c1e" />
+  <link rel="manifest" href="/manifest.json" />
+  <link rel="icon" href="/icons/icon-192.png" sizes="192x192" />
+  <style>
+    :root{
+      --bg-color:#1c1c1e;
+      --input-bg:#2c2c2e;
+      --border-color:#3a3a3c;
+      --primary-blue:#0a84ff;
+      --primary-green:#30d158;
+      --text:#f5f5f7;
+      --muted:#c7c7cc;
+      --danger:#ff375f;
+    }
+    *{box-sizing:border-box}
+    html,body{height:100%}
+    body{
+      margin:0;
+      background:var(--bg-color);
+      color:var(--text);
+      font:16px/1.4 -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
+    }
+    .app-container{
+      max-width:900px;
+      margin:0 auto;
+      padding:24px;
+      display:flex;
+      flex-direction:column;
+      gap:16px;
+    }
+    header{
+      display:flex;align-items:center;justify-content:space-between;gap:12px;
+      border-bottom:1px solid var(--border-color);
+      padding-bottom:12px;
+    }
+    h1{
+      margin:0;font-size:18px;font-weight:600;letter-spacing:0.3px;opacity:0.95;
+    }
+    .badge{font-size:12px;opacity:0.6}
+    .row{display:flex;gap:12px;align-items:center;flex-wrap:wrap}
+    input[type="text"]{
+      background:var(--input-bg);
+      border:1px solid var(--border-color);
+      color:var(--text);
+      padding:10px 12px;border-radius:10px;flex:1;min-width:220px;
+      outline:none;
+    }
+    input[type="text"]::placeholder{color:var(--muted)}
+    textarea{
+      width:100%;
+      background:var(--input-bg);
+      border:1px solid var(--border-color);
+      color:var(--text);
+      padding:14px;border-radius:12px;
+      resize:vertical;
+      min-height:40vh; /* ~ the golden attention slice */
+      font-family: "SF Mono","ui-monospace",Menlo,Consolas,monospace;
+      line-height:1.5; font-size:14px;
+    }
+    .btn{
+      appearance:none;border:0;border-radius:10px;padding:10px 14px;
+      color:#000;font-weight:600;cursor:pointer;transition:transform 0.04s ease;
+    }
+    .btn:active{transform:translateY(1px)}
+    .btn-blue{background:var(--primary-blue);color:#fff}
+    .btn-green{background:var(--primary-green);color:#000}
+    .btn-outline{background:transparent;color:var(--text);border:1px solid var(--border-color)}
+    .status{font-size:13px;opacity:0.85;min-height:1.2em}
+    .footer{opacity:0.6;border-top:1px solid var(--border-color);padding-top:12px;font-size:12px}
+    .pill{padding:6px 10px;border-radius:999px;border:1px solid var(--border-color);opacity:0.9}
+    .hidden{display:none !important}
+  </style>
+</head>
+<body>
+  <div class="app-container">
+    <header>
+      <h1>OneFolder <span class="badge">· PWA</span></h1>
+      <div class="row">
+        <button id="signin" class="btn btn-blue">Sign in with Google</button>
+        <span id="identity" class="pill hidden"></span>
+        <button id="install" class="btn btn-outline hidden">Install</button>
+      </div>
+    </header>
+
+    <div class="row">
+      <input id="title" type="text" placeholder="Optional title (e.g., meeting-notes) — .txt auto-appends">
+      <button id="save" class="btn btn-green">Save to Drive</button>
+    </div>
+
+    <textarea id="content" placeholder="Drop thoughts here. Friction → 0."></textarea>
+
+    <div id="status" class="status"></div>
+
+    <div class="footer">
+      <div>Dark mode is policy, not preference. Everything becomes <code>.txt</code>.</div>
+      <div>Share text from other apps to this PWA. Offline capture works; upload syncs when online.</div>
+    </div>
+  </div>
+
+  <script src="https://accounts.google.com/gsi/client" async defer></script>
+  <script>
+  // ---- Layer III: Authentication Liturgy (pragmatic edition)
+  const CLIENT_ID = "YOUR_GOOGLE_OAUTH_CLIENT_ID.apps.googleusercontent.com"; // <-- replace
+  const SCOPES = "https://www.googleapis.com/auth/drive.file openid email profile";
+
+  let tokenClient = null;
+  let accessToken = null;
+  let userEmail = null;
+
+  function $(id){return document.getElementById(id)}
+
+  async function initAuth(){
+    await new Promise(r => {
+      if (window.google && google.accounts && google.accounts.oauth2) r();
+      else {
+        const check = setInterval(()=>{
+          if (window.google && google.accounts && google.accounts.oauth2){ clearInterval(check); r(); }
+        },50);
+      }
+    });
+    tokenClient = google.accounts.oauth2.initTokenClient({
+      client_id: CLIENT_ID,
+      scope: SCOPES,
+      prompt: "consent",
+      callback: async (resp) => {
+        if (resp && resp.access_token){
+          accessToken = resp.access_token;
+          $("signin").classList.add("hidden");
+          $("identity").classList.remove("hidden");
+          $("status").textContent = "Authenticated.";
+          // get userinfo
+          try{
+            const u = await fetch("https://www.googleapis.com/oauth2/v3/userinfo", {
+              headers:{Authorization:`Bearer ${accessToken}`}
+            }).then(r=>r.json());
+            userEmail = u.email || null;
+            $("identity").textContent = userEmail ? `Signed in: ${userEmail}` : "Signed in";
+          }catch(_){
+            $("identity").textContent = "Signed in";
+          }
+        } else {
+          $("status").textContent = "Sign-in failed.";
+        }
+      }
+    });
+  }
+
+  function requestSignIn(){
+    if (!tokenClient) return;
+    tokenClient.requestAccessToken();
+  }
+
+  function safeFilename(base){
+    // append .txt if missing, strip odd chars
+    let name = (base || "").trim();
+    if (!name){
+      const d = new Date().toISOString().split("T")[0];
+      name = `Note-${d}.txt`;
+    } else {
+      // infer from first line if placeholder string is provided
+      if (!/\.txt$/i.test(name)) name += ".txt";
+    }
+    // remove path-like chars
+    return name.replace(/[\\/:*?"<>|]+/g,"-");
+  }
+
+  async function uploadTextToDrive(filename, content){
+    if (!accessToken) throw new Error("Not authenticated");
+    const boundary = "-------314159265358979323846";
+    const metadata = {
+      name: filename,
+      mimeType: "text/plain"
+      // You can fix a parent folder ID by adding: parents: ["FOLDER_ID"]
+    };
+    const body =
+      `--${boundary}\r\n` +
+      "Content-Type: application/json; charset=UTF-8\r\n\r\n" +
+      JSON.stringify(metadata) + "\r\n" +
+      `--${boundary}\r\n` +
+      "Content-Type: text/plain; charset=UTF-8\r\n\r\n" +
+      content + "\r\n" +
+      `--${boundary}--`;
+
+    const res = await fetch("https://www.googleapis.com/upload/drive/v3/files?uploadType=multipart", {
+      method: "POST",
+      headers: {
+        "Authorization": `Bearer ${accessToken}`,
+        "Content-Type": `multipart/related; boundary=${boundary}`
+      },
+      body
+    });
+    if (!res.ok){
+      const t = await res.text();
+      throw new Error("Drive upload failed: " + t);
+    }
+    return res.json();
+  }
+
+  async function sendSnippet(){
+    const contentEl = $("content");
+    const titleEl = $("title");
+    let text = contentEl.value.trim();
+    if (!text){
+      $("status").textContent = "Nothing to save.";
+      return;
+    }
+    // If title empty, try first non-empty line
+    let base = titleEl.value.trim();
+    if (!base){
+      const firstLine = (text.split(/\n/).find(l => l.trim().length>0) || "").slice(0,60).trim();
+      base = firstLine || "";
+    }
+    const filename = safeFilename(base);
+    $("status").textContent = "Uploading…";
+    try{
+      const file = await uploadTextToDrive(filename, text);
+      $("status").innerHTML = `Saved <strong>${filename}</strong> to Drive.`;
+      // optional: clear after save
+      // contentEl.value = ""; titleEl.value = "";
+    }catch(err){
+      $("status").textContent = err.message;
+    }
+  }
+
+  // PWA install prompt
+  let deferredPrompt = null;
+  window.addEventListener("beforeinstallprompt", (e)=>{
+    e.preventDefault();
+    deferredPrompt = e;
+    $("install").classList.remove("hidden");
+  });
+  $("install").addEventListener("click", async ()=>{
+    if (!deferredPrompt) return;
+    deferredPrompt.prompt();
+    deferredPrompt = null;
+    $("install").classList.add("hidden");
+  });
+
+  // Share-target via SW redirects: parse ?title= & ?text=
+  function hydrateFromURL(){
+    const url = new URL(window.location.href);
+    const t = url.searchParams.get("title");
+    const x = url.searchParams.get("text");
+    if (t) $("title").value = t;
+    if (x) $("content").value = ( $("content").value ? $("content").value + "\n" : "" ) + x;
+    if (t || x) history.replaceState({}, "", "/");
+  }
+
+  // Wire up
+  window.addEventListener("load", async ()=>{
+    hydrateFromURL();
+    await initAuth();
+    $("signin").addEventListener("click", requestSignIn);
+    $("save").addEventListener("click", sendSnippet);
+
+    if ("serviceWorker" in navigator){
+      try{
+        await navigator.serviceWorker.register("/sw.js");
+      }catch(_){ /* ignore */ }
+    }
+  });
+  </script>
+</body>
+</html>
